@@ -493,95 +493,104 @@ def reactivated(df_all: pd.DataFrame, p: Period, dormant_weeks: int = 8) -> pd.D
             out.append({"SKU": sku, "ReactivatedWeek": first_cur, "DormantWeeks": gap_weeks})
     return pd.DataFrame(out).sort_values("ReactivatedWeek") if out else pd.DataFrame(columns=["SKU","ReactivatedWeek","DormantWeeks"])
 
-def lifecycle_table(df_all: pd.DataFrame, p: Period, lookback_weeks: int = 8, scope: str = "combined") -> pd.DataFrame:
-    # Stage per SKU using full history but relative to current period.
-    scope = (scope or "combined").strip().lower()
-    group_keys = ["SKU"] if scope != "retailer" else ["Retailer", "SKU"]
-    s = weekly_series(df_all, group_keys)
-    base_cols = ["SKU", "Stage", "Momentum", "Sales (lookback)"]
-    if scope == "retailer":
-        base_cols = ["Retailer"] + base_cols
+def lifecycle_table(
+    df_all: pd.DataFrame,
+    p: Period,
+    lookback_weeks: int = 8,
+    scope_mode: str = "SKU (All Retailers)",
+) -> pd.DataFrame:
+    """Lifecycle table for either combined SKU view or retailer-specific SKU view."""
+    is_by_retailer = str(scope_mode).strip().lower() == "sku by retailer"
+
+    group_cols = ["Retailer", "SKU"] if is_by_retailer else ["SKU"]
+    s = weekly_series(df_all, group_cols)
     if s.empty:
-        return pd.DataFrame(columns=base_cols)
+        cols = ["SKU", "Stage", "Trend", "Sales (lookback)", "Units (lookback)", "Weeks Up", "Weeks Down", "Weeks With Sales", "Last Week Sales", "WoW Sales Δ"]
+        if is_by_retailer:
+            cols = ["Retailer"] + cols
+        return pd.DataFrame(columns=cols)
 
     anchor = p.end
     lb_start = anchor - pd.Timedelta(days=(7 * lookback_weeks - 1))
-    out = []
-    sold = df_all[df_all["Sales"] > 0].copy()
-    first_week = sold.groupby(group_keys)["WeekEnd"].min()
-    last_week = sold.groupby(group_keys)["WeekEnd"].max()
+    inactive_cutoff = anchor - pd.Timedelta(days=(7 * 12 - 1))
 
-    for key, g in s.groupby(group_keys):
-        g = g.sort_values("WeekEnd")
+    sold = df_all[df_all["Sales"] > 0].copy()
+    first_week = sold.groupby(group_cols)["WeekEnd"].min() if not sold.empty else pd.Series(dtype="datetime64[ns]")
+    last_week = sold.groupby(group_cols)["WeekEnd"].max() if not sold.empty else pd.Series(dtype="datetime64[ns]")
+
+    out = []
+    for key, g in s.groupby(group_cols):
+        g = g.sort_values("WeekEnd").copy()
         gw = g[(g["WeekEnd"] >= lb_start) & (g["WeekEnd"] <= anchor)].copy()
-        mom = momentum_score(gw["Sales"]) if not gw.empty else 0.0
+
         sales_lb = float(gw["Sales"].sum()) if not gw.empty else 0.0
         units_lb = float(gw["Units"].sum()) if (not gw.empty and "Units" in gw.columns) else 0.0
+        weeks_with_sales = int((pd.to_numeric(gw["Sales"], errors="coerce").fillna(0.0) > 0).sum()) if not gw.empty else 0
 
-        if scope == "retailer":
-            retailer, sku = key
-            lookup_key = (retailer, sku)
-        else:
-            retailer = None
-            sku = key
-            lookup_key = sku
-
-        fw = first_week.get(lookup_key, pd.NaT)
-        lw = last_week.get(lookup_key, pd.NaT)
-
-        stage = "Mature"
         trend = "Flat"
-        slope = 0.0
         weeks_up = 0
         weeks_down = 0
         last_w_sales = float(gw["Sales"].iloc[-1]) if len(gw) >= 1 else 0.0
         prev_w_sales = float(gw["Sales"].iloc[-2]) if len(gw) >= 2 else 0.0
         wow_sales = last_w_sales - prev_w_sales if len(gw) >= 2 else np.nan
 
+        if is_by_retailer:
+            retailer, sku = key
+            idx_key = (retailer, sku)
+            fw = first_week.get(idx_key, pd.NaT) if hasattr(first_week, "get") else pd.NaT
+            lw = last_week.get(idx_key, pd.NaT) if hasattr(last_week, "get") else pd.NaT
+        else:
+            sku = key
+            fw = first_week.get(sku, pd.NaT) if hasattr(first_week, "get") else pd.NaT
+            lw = last_week.get(sku, pd.NaT) if hasattr(last_week, "get") else pd.NaT
+
+        stage = "Mature"
         if pd.notna(fw) and (fw >= p.start) and (fw <= p.end):
             stage = "Launch"
-        else:
-            if pd.isna(lw) or lw < lb_start:
-                stage = "Dormant"
+        elif pd.isna(lw) or lw < inactive_cutoff:
+            stage = "Inactive 12+ Weeks"
+        elif pd.isna(lw) or lw < lb_start:
+            stage = "Dormant"
+        elif not gw.empty:
+            trend, _slope, wu, wd = classify_trend(gw["Sales"], min_weeks=min(lookback_weeks, len(gw)))
+            weeks_up, weeks_down = int(wu), int(wd)
+            if trend == "Increasing":
+                stage = "Growth"
+            elif trend == "Declining":
+                stage = "Decline"
             else:
-                if not gw.empty:
-                    trend, slope, wu, wd = classify_trend(gw["Sales"], min_weeks=min(lookback_weeks, len(gw)))
-                    weeks_up, weeks_down = int(wu), int(wd)
-                    if trend == "Increasing":
-                        stage = "Growth"
-                    elif trend == "Declining":
-                        stage = "Decline"
-                    else:
-                        stage = "Mature"
+                stage = "Mature"
 
         row = {
             "SKU": sku,
             "Stage": stage,
             "Trend": trend,
-            "Momentum": mom,
             "Sales (lookback)": sales_lb,
             "Units (lookback)": units_lb,
-            "First Sale": fw,
-            "Last Sale": lw,
-            "Slope": float(slope),
             "Weeks Up": int(weeks_up),
             "Weeks Down": int(weeks_down),
+            "Weeks With Sales": int(weeks_with_sales),
             "Last Week Sales": float(last_w_sales),
             "WoW Sales Δ": float(wow_sales) if not pd.isna(wow_sales) else np.nan,
         }
-        if retailer is not None:
-            row["Retailer"] = retailer
+        if is_by_retailer:
+            row = {"Retailer": retailer, **row}
         out.append(row)
 
     out_df = pd.DataFrame(out)
     if not out_df.empty:
-        sort_cols = ["Stage", "Momentum", "Sales (lookback)"]
-        ascending = [True, False, False]
-        if "Retailer" in out_df.columns:
-            sort_cols = ["Retailer"] + sort_cols
-            ascending = [True] + ascending
-        out_df = out_df.sort_values(sort_cols, ascending=ascending)
+        stage_rank = {
+            "Launch": 1,
+            "Growth": 2,
+            "Mature": 3,
+            "Decline": 4,
+            "Dormant": 5,
+            "Inactive 12+ Weeks": 6,
+        }
+        out_df["_stage_rank"] = out_df["Stage"].map(stage_rank).fillna(99)
+        out_df = out_df.sort_values(["_stage_rank", "Sales (lookback)"], ascending=[True, False]).drop(columns=["_stage_rank"])
     return out_df
+
 
 # -----------------------------
 # Opportunity detector
@@ -1877,49 +1886,77 @@ def run_app():
                     lvl3_disp["Contribution_%"] = lvl3_disp["Contribution_%"].map(pct_fmt)
                     lvl3_disp = rename_ab_columns(lvl3_disp, a_lbl, b_lbl)
                     render_df(lvl3_disp[["SKU", sales_a_col, sales_b_col, "Sales_Δ", "Contribution_%"]], height=240)
-
         st.subheader("2) SKU Lifecycle (Launch → Growth → Mature → Decline → Dormant)")
-        lifecycle_scope_label = st.selectbox(
-            "Lifecycle scope",
-            options=["SKU (All Retailers)", "SKU by Retailer"],
-            index=0,
-            key="sku_lifecycle_scope",
-        )
-        lifecycle_scope = "retailer" if lifecycle_scope_label == "SKU by Retailer" else "combined"
+        lc1, lc2, lc3 = st.columns([1.15, 1.0, 2.2])
+        with lc1:
+            lifecycle_scope = st.selectbox(
+                "Lifecycle scope",
+                options=["SKU (All Retailers)", "SKU by Retailer"],
+                index=0,
+                key="lifecycle_scope_mode",
+            )
+        with lc2:
+            lifecycle_lookback = st.selectbox(
+                "Lifecycle lookback",
+                options=[4, 6, 8, 12, 26, 52],
+                index=2,
+                key="lifecycle_lookback_weeks",
+            )
         life_df_src = df_hist_for_new if show_full_history_lifecycle else df_scope
-        life = lifecycle_table(life_df_src, pA, lookback_weeks=8, scope=lifecycle_scope)
+        life = lifecycle_table(life_df_src, pA, lookback_weeks=int(lifecycle_lookback), scope_mode=lifecycle_scope)
         if life.empty:
             st.caption("Not enough data to compute lifecycle.")
         else:
-            stage_counts = life["Stage"].value_counts().reset_index()
-            stage_counts.columns = ["Stage","Count"]
+            stage_options = [s for s in ["Launch", "Growth", "Mature", "Decline", "Dormant", "Inactive 12+ Weeks"] if s in life["Stage"].astype(str).unique().tolist()]
+            with lc3:
+                lifecycle_stage_filter = st.multiselect(
+                    "Lifecycle stages",
+                    options=stage_options,
+                    default=stage_options,
+                    key="lifecycle_stage_filter",
+                )
+
+            life_filtered = life.copy()
+            if lifecycle_stage_filter:
+                life_filtered = life_filtered[life_filtered["Stage"].isin(lifecycle_stage_filter)].copy()
+            if min_sales > 0:
+                life_filtered = life_filtered[life_filtered["Sales (lookback)"] >= min_sales].copy()
+
+            stage_counts = life_filtered["Stage"].value_counts().reset_index() if not life_filtered.empty else pd.DataFrame(columns=["Stage", "Count"])
+            if not stage_counts.empty:
+                stage_counts.columns = ["Stage","Count"]
+
             left,right = st.columns([1,2])
             with left:
                 st.markdown("**Stage Summary**")
                 render_df(stage_counts, height=220)
             with right:
-                st.markdown(f"**Lifecycle Detail ({lifecycle_scope_label})**")
-                life_show = life.copy()
-                if min_sales > 0:
-                    life_show = life_show[life_show["Sales (lookback)"] >= min_sales].copy()
+                st.markdown("**Lifecycle Detail**")
+                life_show = life_filtered.copy()
 
-                life_show["Sales (lookback)"] = life_show["Sales (lookback)"].map(money)
-                life_show["Units (lookback)"] = life_show["Units (lookback)"].map(lambda v: f"{v:,.0f}")
-                life_show["Last Week Sales"] = life_show["Last Week Sales"].map(money)
-                life_show["WoW Sales Δ"] = life_show["WoW Sales Δ"].map(lambda v: "" if pd.isna(v) else money(v))
-                life_show["Slope"] = life_show["Slope"].map(lambda v: f"{v:,.2f}") if "Slope" in life_show.columns else life_show.get("Slope")
-                for dc in ["First Sale","Last Sale"]:
-                    if dc in life_show.columns:
-                        life_show[dc] = pd.to_datetime(life_show[dc], errors="coerce").dt.date.astype(str)
+                def _trend_line(v):
+                    s = str(v).strip().lower()
+                    if s == "increasing":
+                        return "╱"
+                    if s == "declining":
+                        return "╲"
+                    return "─"
+
+                if not life_show.empty:
+                    life_show["Trend"] = life_show["Trend"].map(_trend_line)
+                    life_show["Sales (lookback)"] = life_show["Sales (lookback)"].map(money)
+                    life_show["Units (lookback)"] = life_show["Units (lookback)"].map(lambda v: f"{v:,.0f}")
+                    life_show["Last Week Sales"] = life_show["Last Week Sales"].map(money)
+                    life_show["WoW Sales Δ"] = life_show["WoW Sales Δ"].map(lambda v: "" if pd.isna(v) else money(v))
+                    life_show["Weeks With Sales"] = life_show["Weeks With Sales"].map(lambda v: f"{int(v):,}" if pd.notna(v) else "0")
 
                 cols = [
-                    "Retailer","SKU","Stage","Trend","Momentum",
-                    "Sales (lookback)","Units (lookback)",
-                    "Last Week Sales","WoW Sales Δ",
-                    "Slope","Weeks Up","Weeks Down","First Sale","Last Sale",
+                    "Retailer", "SKU", "Stage", "Trend",
+                    "Sales (lookback)", "Units (lookback)", "Weeks With Sales",
+                    "Last Week Sales", "WoW Sales Δ", "Weeks Up", "Weeks Down",
                 ]
                 cols = [c for c in cols if c in life_show.columns]
-                render_df(life_show[cols].head(60), height=520)
+                render_df(life_show[cols].head(200), height=520)
     
         st.divider()
     
