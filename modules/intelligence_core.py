@@ -1928,37 +1928,35 @@ def run_app():
             if not stage_counts.empty:
                 stage_counts.columns = ["Stage","Count"]
 
-            left,right = st.columns([1,2])
-            with left:
-                st.markdown("**Stage Summary**")
-                render_df(stage_counts, height=220)
-            with right:
-                st.markdown("**Lifecycle Detail**")
-                life_show = life_filtered.copy()
+            st.markdown("**Stage Summary**")
+            render_df(stage_counts, height=220)
 
-                def _trend_line(v):
-                    s = str(v).strip().lower()
-                    if s == "increasing":
-                        return "╱"
-                    if s == "declining":
-                        return "╲"
-                    return "─"
+            st.markdown("**Lifecycle Detail**")
+            life_show = life_filtered.copy()
 
-                if not life_show.empty:
-                    life_show["Trend"] = life_show["Trend"].map(_trend_line)
-                    life_show["Sales (lookback)"] = life_show["Sales (lookback)"].map(money)
-                    life_show["Units (lookback)"] = life_show["Units (lookback)"].map(lambda v: f"{v:,.0f}")
-                    life_show["Last Week Sales"] = life_show["Last Week Sales"].map(money)
-                    life_show["WoW Sales Δ"] = life_show["WoW Sales Δ"].map(lambda v: "" if pd.isna(v) else money(v))
-                    life_show["Weeks With Sales"] = life_show["Weeks With Sales"].map(lambda v: f"{int(v):,}" if pd.notna(v) else "0")
+            def _trend_line(v):
+                s = str(v).strip().lower()
+                if s == "increasing":
+                    return "╱"
+                if s == "declining":
+                    return "╲"
+                return "─"
 
-                cols = [
-                    "Retailer", "SKU", "Stage", "Trend",
-                    "Sales (lookback)", "Units (lookback)", "Weeks With Sales",
-                    "Last Week Sales", "WoW Sales Δ", "Weeks Up", "Weeks Down",
-                ]
-                cols = [c for c in cols if c in life_show.columns]
-                render_df(life_show[cols].head(200), height=520)
+            if not life_show.empty:
+                life_show["Trend"] = life_show["Trend"].map(_trend_line)
+                life_show["Sales (lookback)"] = life_show["Sales (lookback)"].map(money)
+                life_show["Units (lookback)"] = life_show["Units (lookback)"].map(lambda v: f"{v:,.0f}")
+                life_show["Last Week Sales"] = life_show["Last Week Sales"].map(money)
+                life_show["WoW Sales Δ"] = life_show["WoW Sales Δ"].map(lambda v: "" if pd.isna(v) else money(v))
+                life_show["Weeks With Sales"] = life_show["Weeks With Sales"].map(lambda v: f"{int(v):,}" if pd.notna(v) else "0")
+
+            cols = [
+                "Retailer", "SKU", "Stage", "Trend",
+                "Sales (lookback)", "Units (lookback)",
+                "Last Week Sales", "WoW Sales Δ", "Weeks Up", "Weeks Down", "Weeks With Sales",
+            ]
+            cols = [c for c in cols if c in life_show.columns]
+            render_df(life_show[cols].head(200), height=560)
     
         st.divider()
     
