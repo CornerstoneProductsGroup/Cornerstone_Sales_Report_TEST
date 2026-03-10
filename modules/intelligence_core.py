@@ -540,7 +540,9 @@ def lifecycle_table(
             fw = first_week.get(idx_key, pd.NaT) if hasattr(first_week, "get") else pd.NaT
             lw = last_week.get(idx_key, pd.NaT) if hasattr(last_week, "get") else pd.NaT
         else:
-            sku = key
+            # pandas can hand back a 1-tuple when grouping with ["SKU"].
+            # Normalize that to the actual SKU value before looking up first/last sale.
+            sku = key[0] if isinstance(key, tuple) and len(key) == 1 else key
             fw = first_week.get(sku, pd.NaT) if hasattr(first_week, "get") else pd.NaT
             lw = last_week.get(sku, pd.NaT) if hasattr(last_week, "get") else pd.NaT
 
@@ -1907,7 +1909,7 @@ def run_app():
         if life.empty:
             st.caption("Not enough data to compute lifecycle.")
         else:
-            stage_options = [s for s in ["Launch", "Growth", "Mature", "Decline", "Dormant", "Inactive 12+ Weeks"] if s in life["Stage"].astype(str).unique().tolist()]
+            stage_options = ["Launch", "Growth", "Mature", "Decline", "Dormant", "Inactive 12+ Weeks"]
             with lc3:
                 lifecycle_stage_filter = st.multiselect(
                     "Lifecycle stages",
